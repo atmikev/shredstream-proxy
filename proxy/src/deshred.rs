@@ -213,6 +213,9 @@ pub fn reconstruct_shreds(
             }
         };
 
+        // The parse below feeds only the metrics: a payload this solana-entry cannot parse (a v1
+        // transaction, SIMD-0385) is still forwarded raw when its start is a known
+        // DATA_COMPLETE boundary. A guessed start (unknown_start) is dropped and retried as before.
         let entries = match bincode::deserialize::<Vec<solana_entry::entry::Entry>>(
             &deshredded_payload,
         ) {
@@ -229,8 +232,12 @@ pub fn reconstruct_shreds(
                     metrics
                         .unknown_start_position_error_count
                         .fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
-                continue;
+                metrics
+                    .unparsed_forward_count
+                    .fetch_add(1, Ordering::Relaxed);
+                Vec::new()
             }
         };
         metrics
@@ -1062,6 +1069,63 @@ mod tests {
             all_shreds.len(),
             1, // slot 11111
         );
+    }
+
+    /// T-1557: an entry batch holding v1 transactions (SIMD-0385) fails solana-entry 2.2's
+    /// bincode parse; it is forwarded with its deshredded bytes intact. The fixture is the
+    /// deshredded payload of slot 459681132 data shreds 32-63 (46 entries, 50 txs, 22 v1),
+    /// re-shredded here from index 0 so its start is a known boundary.
+    #[test]
+    fn test_unparsable_v1_batch_forwarded_raw() {
+        let payload = std::fs::read("../bins/slice_459681132_shreds32-63.payload").unwrap();
+        assert_eq!(payload.len(), 29_345);
+        assert!(bincode::deserialize::<Vec<solana_entry::entry::Entry>>(&payload).is_err());
+
+        let slot = 459_681_132;
+        let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let shreds = solana_ledger::shred::merkle::make_shreds_from_data(
+            &thread_pool,
+            &Keypair::new(),
+            Some(Hash::default()), // chained_merkle_root
+            &payload,
+            slot,
+            slot - 1,
+            0,     // shred_version
+            0,     // reference_tick
+            false, // is_last_in_slot: the last data shred carries DATA_COMPLETE only
+            0,     // next_shred_index
+            0,     // next_code_index
+            &ReedSolomonCache::default(),
+            &mut ProcessShredsStats::default(),
+        )
+        .unwrap();
+        let packets = shreds
+            .into_iter()
+            .map(|s| {
+                let mut p = Packet::default();
+                solana_ledger::shred::Shred::from(s).copy_to_packet(&mut p);
+                p
+            })
+            .collect_vec();
+
+        let metrics = ShredMetrics::default();
+        let mut deshredded_entries = Vec::new();
+        reconstruct_shreds(
+            PacketBatch::new(packets),
+            &mut ahash::HashMap::default(),
+            &mut Vec::new(),
+            &mut deshredded_entries,
+            &mut 0,
+            &ReedSolomonCache::default(),
+            &metrics,
+        );
+        assert_eq!(deshredded_entries.len(), 1);
+        let (entry_slot, entries, bytes) = &deshredded_entries[0];
+        assert_eq!(*entry_slot, slot);
+        assert!(entries.is_empty());
+        assert_eq!(bytes, &payload);
+        let unparsed = metrics.unparsed_forward_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(unparsed, 1);
     }
 }
 #[cfg(test)]

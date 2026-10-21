@@ -478,6 +478,8 @@ pub struct ShredMetrics {
     pub fec_recovery_error_count: AtomicU64,
     /// Number of bincode Entry deserialization errors
     pub bincode_deserialize_error_count: AtomicU64,
+    /// Entry batches forwarded raw although the bincode Entry parse failed (v1 transactions)
+    pub unparsed_forward_count: AtomicU64,
     /// Number of times we couldn't find the previous DATA_COMPLETE_SHRED flag but tried to deshred+deserialize, and failed
     pub unknown_start_position_error_count: AtomicU64,
 
@@ -509,6 +511,7 @@ impl ShredMetrics {
             unknown_start_position_count: Default::default(),
             fec_recovery_error_count: Default::default(),
             bincode_deserialize_error_count: Default::default(),
+            unparsed_forward_count: Default::default(),
             unknown_start_position_error_count: Default::default(),
             agg_received_cumulative: Default::default(),
             agg_success_forward_cumulative: Default::default(),
@@ -562,6 +565,11 @@ impl ShredMetrics {
                     "bincode_deserialize_error_count",
                     self.bincode_deserialize_error_count
                         .swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "unparsed_forward_count",
+                    self.unparsed_forward_count.swap(0, Ordering::Relaxed),
                     i64
                 ),
                 (
